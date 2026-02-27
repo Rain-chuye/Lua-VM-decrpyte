@@ -1,0 +1,8 @@
+lua_modified/lua/*.o
+lua_modified/lua/lua
+lua_modified/lua/luac
+lua_modified/lua/liblua.a
+*.so
+chuye_dec_cli
+test.luac
+test_decrypted.luac
