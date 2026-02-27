@@ -7,6 +7,7 @@
 #include "lstate.h"
 #include "lundump.h"
 #include "lopcodes.h"
+#include "lobfuscator.h"
 
 typedef struct {
   lua_State *L;
@@ -24,8 +25,6 @@ static void DumpBlock (const void *b, size_t size, DumpState *D) {
 }
 
 #define DumpVar(x,D)    DumpBlock(&x,sizeof(x),D)
-#define DumpVector(v,n,D) DumpBlock(v,(n)*sizeof((v)[0]),D)
-#define DumpLiteral(s,D)  DumpBlock(s, sizeof(s) - sizeof(char), D)
 
 static void DumpByte (int y, DumpState *D) {
   lu_byte x = (lu_byte)y;
@@ -60,7 +59,16 @@ static void DumpString (const TString *s, DumpState *D) {
 
 static void DumpCode (const Proto *f, DumpState *D) {
   DumpInt(f->sizecode, D);
-  DumpVector(f->code, f->sizecode, D);
+  for (int i = 0; i < f->sizecode; i++) {
+    Instruction inst = f->code[i];
+    if (f->obfuscated) {
+      inst = DECRYPT_INST(inst, i, (uint32_t)f->inst_seed);
+      OpCode op = GET_OPCODE(inst);
+      if (f->op_map) op = (OpCode)f->op_map[op];
+      inst = (inst & ~MASK1(SIZE_OP, POS_OP)) | ((Instruction)op << POS_OP);
+    }
+    DumpVar(inst, D);
+  }
 }
 
 static void DumpFunction(const Proto *f, DumpState *D);
@@ -75,7 +83,12 @@ static void DumpConstants (const Proto *f, DumpState *D) {
       case LUA_TNIL: break;
       case LUA_TBOOLEAN: DumpByte(bvalue(o), D); break;
       case LUA_TNUMFLT: DumpNumber(fltvalue(o), D); break;
-      case LUA_TNUMINT: DumpInteger(ivalue(o), D); break;
+      case LUA_TNUMINT: {
+          lua_Integer val = ivalue(o);
+          if (f->obfuscated) val = (lua_Integer)DECRYPT_INT((uint64_t)val);
+          DumpInteger(val, D);
+          break;
+      }
       case LUA_TSHRSTR: case LUA_TLNGSTR: DumpString(tsvalue(o), D); break;
     }
   }
@@ -92,19 +105,24 @@ static void DumpUpvalues (const Proto *f, DumpState *D) {
 
 static void DumpDebug (const Proto *f, DumpState *D) {
   int i, n;
-  n = f->sizelineinfo;
+  n = (f->obfuscated) ? 0 : f->sizelineinfo;
   DumpInt(n, D);
-  DumpVector(f->lineinfo, n, D);
-  n = f->sizelocvars;
+  if (n > 0) DumpBlock(f->lineinfo, n * sizeof(int), D);
+
+  n = (f->obfuscated) ? 0 : f->sizelocvars;
   DumpInt(n, D);
   for (i = 0; i < n; i++) {
     DumpString(f->locvars[i].varname, D);
     DumpInt(f->locvars[i].startpc, D);
     DumpInt(f->locvars[i].endpc, D);
   }
-  n = f->sizeupvalues;
+
+  n = (f->obfuscated) ? 0 : f->sizeupvalues;
   DumpInt(n, D);
-  for (i = 0; i < n; i++) DumpString(f->upvalues[i].name, D);
+  for (i = 0; i < n; i++) {
+      if (f->obfuscated) DumpString(NULL, D);
+      else DumpString(f->upvalues[i].name, D);
+  }
 }
 
 static void DumpFunction (const Proto *f, DumpState *D) {
@@ -123,12 +141,14 @@ static void DumpFunction (const Proto *f, DumpState *D) {
 }
 
 static void DumpHeader (DumpState *D) {
-  DumpLiteral(LUA_SIGNATURE, D);
+  static const char signature[] = LUA_SIGNATURE;
+  static const char luac_data[] = LUAC_DATA;
+  DumpBlock(signature, sizeof(signature) - 1, D);
   DumpByte(LUAC_VERSION, D);
   DumpByte(LUAC_FORMAT, D);
-  DumpLiteral(LUAC_DATA, D);
+  DumpBlock(luac_data, sizeof(luac_data) - 1, D);
   DumpByte(sizeof(int), D);
-  DumpByte(sizeof(unsigned int), D); // Standard 5.3 uses size_t, but this VM modded to unsigned int
+  DumpByte(sizeof(size_t), D);
   DumpByte(sizeof(Instruction), D);
   DumpByte(sizeof(lua_Integer), D);
   DumpByte(sizeof(lua_Number), D);
